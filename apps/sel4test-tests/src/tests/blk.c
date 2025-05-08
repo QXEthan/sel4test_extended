@@ -224,24 +224,6 @@ static void setup_driver_queue_shmem(struct env *env, sel4utils_process_t target
     map_and_share_frame2(env, target_process, bootinfo->response_shmem_vaddr, size_bytes);
 }
 
-void notified(microkit_channel ch)
-{
-    if (ch == device_resources.irqs[0].id) {
-        handle_irq();
-        microkit_deferred_irq_ack(ch);
-        /*
-         * It is possible that we could not enqueue all requests when being notified
-         * by the virtualiser because we ran out of space, so we try again now that
-         * we have received a response and have resources freed.
-         */
-        handle_request();
-    } else if (ch == config.virt.id) {
-        handle_request();
-    } else {
-        LOG_DRIVER_ERR("received notification from unknown channel: 0x%x\n", ch);
-    }
-}
-
 static int blk_driver_entry_point(seL4_Word _bootinfo, seL4_Word a1, seL4_Word a2, seL4_Word a3)
 {
     ZF_LOGI("@@@@@@@@@@@@@@@@@@@@@@@@@@     In entry point     @@@@@@@@@@@@@@@@@@@@@@@@@@\n");
