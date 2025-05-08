@@ -345,6 +345,9 @@ static int setup_client_process_allocman_vka_and_vspace(seL4_CPtr ut_cap, size_t
 static int client_common_entry_point(seL4_Word _test_fn, seL4_Word _used_pages_list,
                                      seL4_Word n_used_pages, seL4_Word thread_num)
 {
+    ZF_LOGI("@@@@@@@@@@@@@@@@@@@@@@@@@@     In entry point     @@@@@@@@@@@@@@@@@@@@@@@@@@\n");
+    ZF_LOGI("@@@@@@@@@@@@@@@@@@@@@@@@@@     In entry point     @@@@@@@@@@@@@@@@@@@@@@@@@@\n");
+    ZF_LOGI("@@@@@@@@@@@@@@@@@@@@@@@@@@     In entry point     @@@@@@@@@@@@@@@@@@@@@@@@@@\n");
     bool is_process;
     client_test_data_t *client_data;
     volatile void **used_pages_list = (volatile void **)_used_pages_list;

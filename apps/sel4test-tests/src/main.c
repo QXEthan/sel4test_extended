@@ -162,6 +162,7 @@ static int core_count(UNUSED void *data)
 
 void init_simple(env_t env, test_init_data_t *init_data)
 {
+    ZF_LOGI("### In init simple ###");
     /* minimal simple implementation */
     env->simple.data = (void *) init_data;
     env->simple.arch_simple.data = (void *) init_data;

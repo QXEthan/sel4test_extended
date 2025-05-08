@@ -40,3 +40,20 @@ if(SIMULATION)
     endif()
     GenerateSimulateScript()
 endif()
+
+# Path to mkvirtdisk script
+set(MKVIRTDISK ${CMAKE_SOURCE_DIR}/mkvirtdisk)
+
+# Target virtual disk output path
+set(VIRTUAL_DISK ${CMAKE_BINARY_DIR}/disk)
+
+# Define how to generate the virtual disk
+add_custom_command(
+    OUTPUT ${VIRTUAL_DISK}
+    COMMAND ${MKVIRTDISK} ${VIRTUAL_DISK} 1 512 16777216
+    DEPENDS ${MKVIRTDISK}
+    COMMENT "Generating virtual disk image using mkvirtdisk..."
+)
+
+# Hook this generation into the build system
+add_custom_target(create_virtual_disk ALL DEPENDS ${VIRTUAL_DISK})
