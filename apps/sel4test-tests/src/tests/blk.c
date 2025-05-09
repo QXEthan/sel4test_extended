@@ -27,6 +27,33 @@
 
 #define ALIGN(x, align)   (((x) + (align) - 1) & ~((align) - 1))
 
+#define VIRT_IRQ 1
+#define VIRT_NOTIFICATION 2
+
+volatile struct virtio_blk_config *virtio_config;
+
+/*
+* A mapping from virtIO header index in the descriptor virtq ring, to the sDDF ID given
+* in the request. We need this mapping due to out of order operations.
+*/
+uint32_t virtio_header_to_id[QUEUE_SIZE];
+
+uintptr_t virtio_headers_paddr;
+struct virtio_blk_req *virtio_headers;
+
+blk_queue_handle_t blk_queue;
+
+volatile struct virtq virtq;
+
+/*
+* Due to the out-of-order nature of virtIO, we need a way of allocating indexes in a
+* non-linear way.
+*/
+ialloc_t ialloc_desc;
+uint32_t descriptors[QUEUE_SIZE];
+
+uint16_t last_seen_used = 0;
+
 // blk driver process
 static helper_thread_t blk_driver_thread;
 
@@ -44,6 +71,11 @@ typedef struct blk_driver_boot_info {
     uintptr_t request_paddr;
     uintptr_t response_shmem_vaddr;
     uintptr_t response_paddr;
+
+    // notification
+    seL4_CPtr badged_nt;
+    seL4_CPtr irq_cap;
+    seL4_CPtr driver_virt_nt;
 
 } blk_driver_boot_info_t;
 
@@ -224,6 +256,237 @@ static void setup_driver_queue_shmem(struct env *env, sel4utils_process_t target
     map_and_share_frame2(env, target_process, bootinfo->response_shmem_vaddr, size_bytes);
 }
 
+void notified(blk_driver_boot_info_t *boot_info)
+{
+    volatile virtio_mmio_regs_t *regs = (volatile virtio_mmio_regs_t *) boot_info->regs_vaddr;
+    while (1) {
+        seL4_Word badge;
+        seL4_Wait(boot_info->badged_nt, &badge);
+        if (badge & VIRT_IRQ) {
+            ZF_LOGI("Get IRQ from device\n");
+            handle_irq(boot_info);
+            handle_request(boot_info);
+            /* Ack */
+            seL4_IRQHandler_Ack(boot_info->irq_cap);
+        }
+        if (badge & VIRT_NOTIFICATION) {
+            handle_request(boot_info);
+        }
+        if (!(badge & (VIRT_IRQ | VIRT_NOTIFICATION))) {
+            ZF_LOGE("received notification from unknown channel: 0x%x\n", badge);
+        }
+    }
+}
+
+void handle_irq(blk_driver_boot_info_t *boot_info)
+{
+    ZF_LOGI("In IRQ handler\n");
+    volatile virtio_mmio_regs_t *regs = (volatile virtio_mmio_regs_t *) boot_info->regs_vaddr;
+    uint32_t irq_status = regs->InterruptStatus;
+    if (irq_status & VIRTIO_MMIO_IRQ_VQUEUE) {
+        handle_response(boot_info);
+        regs->InterruptACK = VIRTIO_MMIO_IRQ_VQUEUE;
+    }
+
+    if (irq_status & VIRTIO_MMIO_IRQ_CONFIG) {
+        ZF_LOGE("unexpected change in configuration\n");
+    }
+}
+
+void handle_response(blk_driver_boot_info_t *boot_info)
+{
+    bool notify = false;
+
+    uint16_t i = last_seen_used;
+    uint16_t curr_idx = virtq.used->idx;
+    while (i != curr_idx) {
+        uint16_t virtq_idx = i % virtq.num;
+        struct virtq_used_elem hdr_used = virtq.used->ring[virtq_idx];
+        assert(virtq.desc[hdr_used.id].flags & VIRTQ_DESC_F_NEXT);
+
+        struct virtq_desc hdr_desc = virtq.desc[hdr_used.id];
+        LOG_DRIVER("response header addr: 0x%lx, len: %d\n", hdr_desc.addr, hdr_desc.len);
+
+        assert(hdr_desc.len == VIRTIO_BLK_REQ_HDR_SIZE);
+        struct virtio_blk_req *hdr = &virtio_headers[virtq_idx];
+        virtio_blk_print_req(hdr);
+
+        uint16_t data_desc_idx = virtq.desc[hdr_used.id].next;
+        struct virtq_desc data_desc = virtq.desc[data_desc_idx % virtq.num];
+        uint32_t data_len = data_desc.len;
+#ifdef DEBUG_DRIVER
+        uint64_t data_addr = data_desc.addr;
+        LOG_DRIVER("response data addr: 0x%lx, data len: %d\n", data_addr, data_len);
+#endif
+
+        uint16_t footer_desc_idx = virtq.desc[data_desc_idx].next;
+
+        blk_resp_status_t status;
+        if (hdr->status == VIRTIO_BLK_S_OK) {
+            status = BLK_RESP_OK;
+        } else {
+            status = BLK_RESP_ERR_UNSPEC;
+        }
+        int err = blk_enqueue_resp(&blk_queue, status, data_len / BLK_TRANSFER_SIZE, virtio_header_to_id[hdr_used.id]);
+        assert(!err);
+
+        /* Free up the descriptors we used */
+        err = ialloc_free(&ialloc_desc, hdr_used.id);
+        assert(!err);
+        err = ialloc_free(&ialloc_desc, data_desc_idx);
+        assert(!err);
+        err = ialloc_free(&ialloc_desc, footer_desc_idx);
+        assert(!err);
+
+        i += 1;
+        notify = true;
+    }
+
+    if (notify) {
+        // microkit_notify(config.virt.id);
+        seL4_Signal(boot_info->driver_virt_nt);
+    }
+
+    last_seen_used = i;
+}
+
+void handle_request(blk_driver_boot_info_t *boot_info)
+{
+    volatile virtio_mmio_regs_t *regs = (volatile virtio_mmio_regs_t *) boot_info->regs_vaddr;
+    /* Whether or not we notify the virtIO device to say something has changed
+     * in the virtq. */
+    bool virtio_queue_notify = false;
+
+    /* Consume all requests and put them in the 'avail' ring of the virtq. We do not
+     * dequeue unless we know we can put the request in the virtq. */
+    while (!blk_queue_empty_req(&blk_queue) && ialloc_num_free(&ialloc_desc) >= 3) {
+        blk_req_code_t req_code;
+        uintptr_t phys_addr;
+        uint64_t block_number;
+        uint16_t count;
+        uint32_t id;
+        int err = blk_dequeue_req(&blk_queue, &req_code, &phys_addr, &block_number, &count, &id);
+        assert(!err);
+
+        /*
+         * The block size sDDF expects is different to virtIO, so we must first convert the request
+         * parameters to virtIO.
+         */
+        assert(BLK_TRANSFER_SIZE >= VIRTIO_BLK_SECTOR_SIZE);
+        size_t virtio_block_number = block_number * (BLK_TRANSFER_SIZE / VIRTIO_BLK_SECTOR_SIZE);
+        size_t virtio_count = count * (BLK_TRANSFER_SIZE / VIRTIO_BLK_SECTOR_SIZE);
+
+        switch (req_code) {
+        case BLK_REQ_READ:
+        case BLK_REQ_WRITE: {
+            /*
+             * Read and write requests are almost identical with virtIO so we combine them
+             * here to save a bit of code duplication.
+             * Each sDDF read/write is split into three virtIO descriptors:
+             *     * header
+             *     * data
+             *     * footer (status field of the header)
+             *
+             * This is a bit weird, but the reason it is done is so that we do not have to do
+             * any copying to/from the sDDF data region. The 'data' is expected between some of
+             * the fields in the header and so we have one descriptor for all the fields, then
+             * a 'footer' descriptor with the single remaining field of the header
+             * (the status field).
+             *
+             */
+
+            /* It is the responsibility of the virtualiser to check that the request is valid,
+             * so we just assert that the block number and count do not exceed the capacity. */
+            assert(virtio_block_number + virtio_count <= virtio_config->capacity);
+
+            if (req_code == BLK_REQ_READ) {
+                LOG_DRIVER("handling read request with physical address 0x%lx, block_number: 0x%x, count: 0x%x, id: 0x%x\n",
+                           phys_addr, block_number, count, id);
+            } else {
+                LOG_DRIVER("handling write request with physical address 0x%lx, block_number: 0x%x, count: 0x%x, id: 0x%x\n",
+                           phys_addr, block_number, count, id);
+            }
+
+            uint32_t hdr_desc_idx = -1;
+            uint32_t data_desc_idx = -1;
+            uint32_t footer_desc_idx = -1;
+
+            int err;
+            err = ialloc_alloc(&ialloc_desc, &hdr_desc_idx);
+            assert(!err && hdr_desc_idx != -1);
+            err = ialloc_alloc(&ialloc_desc, &data_desc_idx);
+            assert(!err && data_desc_idx != -1);
+            err = ialloc_alloc(&ialloc_desc, &footer_desc_idx);
+            assert(!err && footer_desc_idx != -1);
+
+            uint16_t data_flags = VIRTQ_DESC_F_NEXT;
+            uint16_t type;
+            if (req_code == BLK_REQ_READ) {
+                type = VIRTIO_BLK_T_IN;
+                /* Doing a read request, so device needs to be able to write into the DMA region. */
+                data_flags |= VIRTQ_DESC_F_WRITE;
+            } else {
+                type = VIRTIO_BLK_T_OUT;
+            }
+
+            struct virtio_blk_req *hdr = &virtio_headers[hdr_desc_idx];
+            hdr->type = type;
+            hdr->sector = virtio_block_number;
+
+            virtq.desc[hdr_desc_idx] = (struct virtq_desc) {
+                .addr = virtio_headers_paddr + (hdr_desc_idx * sizeof(struct virtio_blk_req)),
+                .len = VIRTIO_BLK_REQ_HDR_SIZE,
+                .flags = VIRTQ_DESC_F_NEXT,
+                .next = data_desc_idx,
+            };
+
+            virtq.desc[data_desc_idx] = (struct virtq_desc) {
+                .addr = phys_addr,
+                .len = VIRTIO_BLK_SECTOR_SIZE * virtio_count,
+                .flags = data_flags,
+                .next = footer_desc_idx,
+            };
+
+            virtq.desc[footer_desc_idx] = (struct virtq_desc) {
+                .addr = virtq.desc[hdr_desc_idx].addr + VIRTIO_BLK_REQ_HDR_SIZE,
+                .len = 1,
+                .flags = VIRTQ_DESC_F_WRITE,
+            };
+
+            virtq.avail->ring[virtq.avail->idx % virtq.num] = hdr_desc_idx;
+            virtq.avail->idx++;
+            virtio_queue_notify = true;
+
+            virtio_header_to_id[hdr_desc_idx] = id;
+
+            break;
+        }
+        case BLK_REQ_FLUSH: {
+            int err = blk_enqueue_resp(&blk_queue, BLK_RESP_OK, 0, id);
+            assert(!err);
+            // microkit_notify(config.virt.id);
+            seL4_Signal(boot_info->driver_virt_nt);
+            break;
+        }
+        case BLK_REQ_BARRIER: {
+            int err = blk_enqueue_resp(&blk_queue, BLK_RESP_OK, 0, id);
+            assert(!err);
+            //microkit_notify(config.virt.id);
+            seL4_Signal(boot_info->driver_virt_nt);
+            break;
+        }
+        default:
+            /* The virtualiser should have sanitised the request code and so we should never get here. */
+            LOG_DRIVER_ERR("unsupported request code: 0x%x\n", req_code);
+            break;
+        }
+    }
+
+    if (virtio_queue_notify) {
+        regs->QueueNotify = 0;
+    }
+}
+
 static int blk_driver_entry_point(seL4_Word _bootinfo, seL4_Word a1, seL4_Word a2, seL4_Word a3)
 {
     ZF_LOGI("@@@@@@@@@@@@@@@@@@@@@@@@@@     In entry point     @@@@@@@@@@@@@@@@@@@@@@@@@@\n");
@@ -232,42 +495,25 @@ static int blk_driver_entry_point(seL4_Word _bootinfo, seL4_Word a1, seL4_Word a
 
 
     blk_driver_boot_info_t *boot_info = (blk_driver_boot_info_t *)_bootinfo;
-    
-    blk_queue_handle_t blk_queue;
 
-    uintptr_t virtio_headers_paddr = boot_info->headers_paddr;
-    struct virtio_blk_req *virtio_headers = (struct virtio_blk_req *) boot_info->headers_vaddr;
-
-    /*
-    * A mapping from virtIO header index in the descriptor virtq ring, to the sDDF ID given
-    * in the request. We need this mapping due to out of order operations.
-    */
-    uint32_t virtio_header_to_id[QUEUE_SIZE];
+    virtio_headers_paddr = boot_info->headers_paddr;
+    virtio_headers = (struct virtio_blk_req *) boot_info->headers_vaddr;
 
     virtio_blk_init(boot_info);
     blk_queue_init(&blk_queue, boot_info->request_shmem_vaddr, boot_info->response_shmem_vaddr, VIRTQ_NUM_REQUESTS);
+
+    //notified
+    notified(boot_info);
 }
 
 void virtio_blk_init(blk_driver_boot_info_t *boot_info)
     {
         ZF_LOGI("In virtio_blk_init\n");
         /* Block device configuration, populated during initiliastion. */
-        volatile struct virtio_blk_config *virtio_config;
         volatile virtio_mmio_regs_t *regs = (volatile virtio_mmio_regs_t *) boot_info->regs_vaddr;
 
         uintptr_t requests_paddr = boot_info->request_paddr;
         uintptr_t requests_vaddr = boot_info->request_shmem_vaddr;
-        volatile struct virtq virtq;
-
-        /*
-        * Due to the out-of-order nature of virtIO, we need a way of allocating indexes in a
-        * non-linear way.
-        */
-        ialloc_t ialloc_desc;
-        uint32_t descriptors[QUEUE_SIZE];
-
-        uint16_t last_seen_used = 0;
-        
         for (int i = 0; i < 8; i++) {
             volatile virtio_mmio_regs_t *regs_tmp = (volatile virtio_mmio_regs_t *) (boot_info->regs_vaddr + i*0x200);
             ZF_LOGI("for loop %p\n", regs_tmp);
@@ -415,6 +661,13 @@ void create_and_share_boot_info(struct env *env, sel4utils_process_t target_proc
     ZF_LOGI("After sel4utils_share_mem_at_vaddr\n");
 }
 
+static seL4_CPtr badge_endpoint(env_t env, seL4_Word badge, seL4_CPtr ep)
+{
+    seL4_CPtr slot = get_free_slot(env);
+    int error = cnode_mint(env, ep, slot, seL4_AllRights, badge);
+    test_error_eq(error, seL4_NoError);
+    return slot;
+}
 
 static void init_blk_driver_server(struct env *env) {
     int error;
@@ -444,6 +697,21 @@ static void init_blk_driver_server(struct env *env) {
     setup_driver_storage_info_shmem(env, blk_driver_thread.process, driver_bootinfo);
     setup_driver_queue_shmem(env, blk_driver_thread.process, driver_bootinfo);
     ZF_LOGI("After init shared mem\n");
+
+    // notification
+    seL4_CPtr nt = vka_alloc_notification_leaky(&env->vka);
+    seL4_CPtr badged_nt = badge_endpoint(env, VIRT_IRQ, nt);
+    cspacepath_t irq_path;
+    vka_cspace_alloc_path(&env->vka, &irq_path);
+    seL4_IRQControl_GetTrigger(seL4_CapIRQControl, 47, 1, irq_path.root, irq_path.capPtr, irq_path.capDepth);
+    seL4_IRQHandler_SetNotification(irq_path.capPtr, badged_nt);
+    seL4_IRQHandler_Ack(irq_path.capPtr);
+
+    seL4_CPtr childIrqCptr = sel4utils_copy_path_to_process(&blk_driver_thread.process, irq_path);
+    seL4_CPtr childNTCptr = sel4utils_copy_cap_to_process(&blk_driver_thread.process, &env->vka, badged_nt);
+    driver_bootinfo->badged_nt = childNTCptr;
+    driver_bootinfo->irq_cap = childIrqCptr;
+
     // start driver
     start_helper(env, &blk_driver_thread, &blk_driver_entry_point, (seL4_Word)driver_bootinfo, 0, 0, 0);
     error = wait_for_helper(&blk_driver_thread);
