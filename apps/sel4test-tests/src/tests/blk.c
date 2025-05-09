@@ -10,6 +10,7 @@
 #include <serial_server/parent.h>
 #include <serial_server/client.h>
 // #include <simple/simple.h>
+#include <basic_data.h>
 #include <virtio.h>
 #include <virtio_queue.h>
 #include <queue.h>
@@ -29,6 +30,9 @@
 
 #define VIRT_IRQ 1
 #define VIRT_NOTIFICATION 2
+#define BADGE_V2C 0x11
+#define BADGE_C2V 0x22
+
 
 volatile struct virtio_blk_config *virtio_config;
 
@@ -42,6 +46,7 @@ uintptr_t virtio_headers_paddr;
 struct virtio_blk_req *virtio_headers;
 
 blk_queue_handle_t blk_queue;
+blk_queue_handle_t blk_c2v_queue;
 
 volatile struct virtq virtq;
 
@@ -56,6 +61,10 @@ uint16_t last_seen_used = 0;
 
 // blk driver process
 static helper_thread_t blk_driver_thread;
+// client process
+static helper_thread_t blk_client_thread;
+// virt process
+static helper_thread_t blk_virt_thread;
 
 typedef struct blk_driver_boot_info {
     uintptr_t regs_vaddr;
@@ -79,6 +88,40 @@ typedef struct blk_driver_boot_info {
 
 } blk_driver_boot_info_t;
 
+typedef struct blk_client_boot_info {
+    uintptr_t storage_info_vaddr;
+    uintptr_t request_shmem_vaddr;
+    uintptr_t request_paddr;
+    uintptr_t response_shmem_vaddr;
+    uintptr_t response_paddr;
+    uintptr_t client_data;
+
+    // notification
+    seL4_CPtr virt_nt;
+    seL4_CPtr client_nt;
+
+} blk_client_boot_info_t;
+
+typedef struct blk_virt_boot_info {
+    uintptr_t driver_storage_info_vaddr;
+    uintptr_t driver_request_shmem_vaddr;
+    uintptr_t driver_request_paddr;
+    uintptr_t driver_response_shmem_vaddr;
+    uintptr_t driver_response_paddr;
+    uintptr_t driver_data;
+
+    uintptr_t client_storage_info_vaddr;
+    uintptr_t client_request_shmem_vaddr;
+    uintptr_t client_request_paddr;
+    uintptr_t client_response_shmem_vaddr;
+    uintptr_t client_response_paddr;
+    uintptr_t client_data;
+
+    // notification
+    seL4_CPtr virt_nt;
+    seL4_CPtr client_nt;
+
+} blk_virt_boot_info_t;
 
 // void notified(microkit_channel ch)
 // {
@@ -161,7 +204,8 @@ static void map_and_share_frame(struct env *env, sel4utils_process_t target_proc
     }
 }
 
-static void map_and_share_frame2(struct env *env, sel4utils_process_t target_process,  uintptr_t vaddr, size_t size_bytes)
+static void map_and_share_frame2(struct env *env, sel4utils_process_t target_process, sel4utils_process_t target_process2, 
+        uintptr_t vaddr1, uintptr_t vaddr2, size_t size_bytes)
 {
     seL4_Error err;
     ZF_LOGI("In map_and_share_frame2, bytes: %d\n", size_bytes);
@@ -669,19 +713,10 @@ static seL4_CPtr badge_endpoint(env_t env, seL4_Word badge, seL4_CPtr ep)
     return slot;
 }
 
-static void init_blk_driver_server(struct env *env) {
+static void init_blk_driver_server(struct env *env, struct blk_driver_boot_info *driver_bootinfo) {
     int error;
     seL4_Word prio = 200;
-    ZF_LOGI("in init_blk_driver_server\n");
-    // init process
-    create_helper_process(env, &blk_driver_thread);
-    set_helper_priority(env, &blk_driver_thread, prio);
-    // init shared memory
-    ZF_LOGI("After create process\n");
-    void *vaddr_to_map;
-    create_and_share_boot_info(env, blk_driver_thread.process, &vaddr_to_map);
-    blk_driver_boot_info_t *driver_bootinfo = (blk_driver_boot_info_t *) vaddr_to_map;
-    ZF_LOGI("After create bootinfo, %x\n", vaddr_to_map);
+    ZF_LOGI("####################   in init_blk_driver_server   ##########################\n");
     driver_bootinfo->regs_vaddr = 0x20000000;
     ZF_LOGI("After init regs_vaddr\n");
     driver_bootinfo->headers_vaddr = 0x20001000;
@@ -714,26 +749,222 @@ static void init_blk_driver_server(struct env *env) {
 
     // start driver
     start_helper(env, &blk_driver_thread, &blk_driver_entry_point, (seL4_Word)driver_bootinfo, 0, 0, 0);
-    error = wait_for_helper(&blk_driver_thread);
-    test_eq(error, 0);
     ZF_LOGI("After boot process\n");
 }
+
+/* Use the start of the partition for testing. */
+#define REQUEST_BLK_NUMBER 0
+#define REQUEST_NUM_BLOCKS 2
+
+enum test_basic_state {
+    START,
+    READ,
+    FINISH,
+};
+
+enum test_basic_state test_basic_state = START;
+
+static inline void *sddf_memcpy(void *dest, const void *src, size_t n)
+{
+    unsigned char *to = dest;
+    const unsigned char *from = src;
+    while (n-- > 0) {
+        *to++ = *from++;
+    }
+    return dest;
+}
+
+bool test_basic(blk_client_boot_info_t *boot_info)
+{
+    switch (test_basic_state) {
+    case START: {
+        ZF_LOGI("basic: START state\n");
+        // We assume that the data fits into two blocks
+        assert(basic_data_len <= BLK_TRANSFER_SIZE * 2);
+
+        // Copy our testing data into the block data region
+        char *data_dest = (char *)boot_info->client_data;
+        sddf_memcpy(data_dest, basic_data, basic_data_len);
+
+        int err = blk_enqueue_req(&blk_queue, BLK_REQ_WRITE, 0, REQUEST_BLK_NUMBER, REQUEST_NUM_BLOCKS, 0);
+        assert(!err);
+
+        test_basic_state = READ;
+
+        break;
+    }
+    case READ: {
+        ZF_LOGI("basic: READ state\n");
+        /* Check that our previous write was successful */
+        blk_resp_status_t status = -1;
+        uint16_t count = -1;
+        uint32_t id = -1;
+        int err = blk_dequeue_resp(&blk_queue, &status, &count, &id);
+        assert(!err);
+        assert(status == BLK_RESP_OK);
+        assert(count == REQUEST_NUM_BLOCKS);
+        assert(id == 0);
+
+        /* We do the read at a different offset into the data region from the previous request */
+        uintptr_t offset = REQUEST_NUM_BLOCKS * BLK_TRANSFER_SIZE;
+        err = blk_enqueue_req(&blk_queue, BLK_REQ_READ, offset, REQUEST_BLK_NUMBER, REQUEST_NUM_BLOCKS, 0);
+        assert(!err);
+
+        test_basic_state = FINISH;
+
+        break;
+    }
+    case FINISH: {
+        ZF_LOGI("basic: FINISH state\n");
+        blk_resp_status_t status = -1;
+        uint16_t count = -1;
+        uint32_t id = -1;
+        int err = blk_dequeue_resp(&blk_queue, &status, &count, &id);
+        assert(!err);
+        assert(status == BLK_RESP_OK);
+        assert(count == REQUEST_NUM_BLOCKS);
+        assert(id == 0);
+
+        // Check that the read went okay
+        char *read_data = (char *)(boot_info->client_data + (REQUEST_NUM_BLOCKS * BLK_TRANSFER_SIZE));
+        for (int i = 0; i < basic_data_len; i++) {
+            if (read_data[i] != basic_data[i]) {
+                ZF_LOGE("basic: mismatch in bytes at position %d\n", i);
+            }
+        }
+
+        for (int i = 0; i < BLK_TRANSFER_SIZE; i += 90) {
+            for (int j = 0; j < 90; j++) {
+                ZF_LOGI("%c", read_data[i + j]);
+            }
+        }
+        ZF_LOGI("\n");
+
+        ZF_LOGI("basic: successfully finished!\n");
+
+        return true;
+    }
+    default:
+        ZF_LOGE("internal error, invalid state\n");
+        assert(false);
+    }
+
+    return false;
+}
+
+static int blk_client_entry_point(seL4_Word _bootinfo, seL4_Word a1, seL4_Word a2, seL4_Word a3)
+{
+    ZF_LOGI("@@@@@@@@@@@@@@@@@@@@@@@@@@     In client entry point     @@@@@@@@@@@@@@@@@@@@@@@@@@\n");
+    ZF_LOGI("@@@@@@@@@@@@@@@@@@@@@@@@@@     In client entry point     @@@@@@@@@@@@@@@@@@@@@@@@@@\n");
+    ZF_LOGI("@@@@@@@@@@@@@@@@@@@@@@@@@@     In client entry point     @@@@@@@@@@@@@@@@@@@@@@@@@@\n");
+
+
+    blk_client_boot_info_t *boot_info = (blk_driver_boot_info_t *)_bootinfo;
+    blk_queue_init(&blk_c2v_queue, boot_info->request_shmem_vaddr, boot_info->response_shmem_vaddr, VIRTQ_NUM_REQUESTS);
+
+    /* Want to print out the storage info, so spin until the it is ready. */
+    blk_storage_info_t *storage_info = boot_info->storage_info_vaddr;
+    while (!blk_storage_is_ready(storage_info));
+    ZF_LOGI("device config ready\n");
+    ZF_LOGI("device size: 0x%lx bytes\n", storage_info->capacity * BLK_TRANSFER_SIZE);
+
+    /* Before proceeding, check that the offset into the device we will
+     * do I/O on is sane. */
+    assert(REQUEST_BLK_NUMBER < storage_info->capacity - REQUEST_NUM_BLOCKS);
+
+    test_basic(boot_info);
+    // microkit_notify(config.virt.id);
+    seL4_Signal(boot_info->virt_nt);
+}
+
+static void init_blk_client_virt(struct env *env, struct blk_client_boot_info * client_bootinfo, struct blk_virt_boot_info * virt_bootinfo) {
+    int error;
+    ZF_LOGI("####################   in init_blk_client_virt   ##########################\n");
+    client_bootinfo->storage_info_vaddr = 0x20000000;
+    client_bootinfo->request_shmem_vaddr = 0x20200000;
+    client_bootinfo->response_shmem_vaddr = 0x20400000;
+    client_bootinfo->client_data = 0x20600000;
+    virt_bootinfo->client_data = 0x20e00000;
+    virt_bootinfo->client_request_shmem_vaddr = 0x20a00000;
+    virt_bootinfo->client_response_shmem_vaddr = 0x20c00000;
+    virt_bootinfo->client_storage_info_vaddr = 0x20800000;
+    ZF_LOGI("After init bootinfo\n");
+    // storage info, size = 0x1000
+    map_and_share_frame2(env, blk_client_thread.process, client_bootinfo->storage_info_vaddr, 0x1000);
+    map_and_share_frame2(env, blk_client_thread.process, client_bootinfo->request_shmem_vaddr, 0x200000);
+    map_and_share_frame2(env, blk_client_thread.process, client_bootinfo->response_shmem_vaddr, 0x200000);
+    map_and_share_frame2(env, blk_client_thread.process, client_bootinfo->client_data, 0x200000);
+    ZF_LOGI("After init shared mem\n");
+
+    // notification
+    seL4_CPtr nt_c2v = vka_alloc_notification_leaky(&env->vka);
+    seL4_CPtr badged_nt = badge_endpoint(env, BADGE_V2C, nt_c2v);
+    seL4_CPtr nt_v2c_in_client = sel4utils_copy_cap_to_process(&blk_client_thread.process, &env->vka, badged_nt);     /* client Wait */
+    seL4_CPtr nt_v2c_send_in_virt = sel4utils_copy_cap_to_process(&blk_virt_thread.process, &env->vka, badged_nt);     /* virt Signal */
+    seL4_CPtr badged_nt_c2v = badge_endpoint(env, BADGE_C2V, nt_c2v);
+    seL4_CPtr nt_c2v_in_virt =  sel4utils_copy_cap_to_process(&blk_virt_thread.process, &env->vka, badged_nt_c2v);     /* virt Wait */
+    seL4_CPtr nt_c2v_send_in_client = sel4utils_copy_cap_to_process(&blk_client_thread.process, &env->vka, badged_nt_c2v);     /* client Signal */
+
+    client_bootinfo->client_nt = nt_v2c_in_client;       /* client Wait badge 0x11 */
+    client_bootinfo->virt_nt = nt_c2v_send_in_client;  /* client Signal badge 0x22 */
+
+    // virt_boot->clients[cli_id].nt_wait   = nt_c2v_in_virt;
+    // virt_cfg->clients[cli_id].nt_signal = nt_v2c_send_in_virt;
+
+    // start driver
+    start_helper(env, &blk_client_thread, &blk_client_entry_point, (seL4_Word)client_bootinfo, 0, 0, 0);
+    ZF_LOGI("After boot process\n");
+}
+
+static void init_blk_virt_process(struct env *env, struct blk_virt_boot_info * client_bootinfo) {
+    int error;
+    ZF_LOGI("####################   in init_virt_client   ##########################\n");
+
+}
+
 
 static int test_blk(struct env *env)
 {
     int error;
     ZF_LOGI("############    In test_blk, BLK_001   #################\n");
 
-    /**
-     * 1. init blk_driver_process and start
-    **/ 
-    init_blk_driver_server(env);
     /* 
-     * 2. init blk_virt_process and start
-     * 3. init blk_client and start
+     * 1. init blk_client_process and start
      */
+    create_helper_process(env, &blk_client_thread);
+    set_helper_priority(env, &blk_client_thread, 1);
+    // init shared memory
+    ZF_LOGI("After create client process\n");
+    void *vaddr_to_map;
+    create_and_share_boot_info(env, blk_client_thread.process, &vaddr_to_map);
+    blk_client_boot_info_t *client_bootinfo = (blk_client_boot_info_t *) vaddr_to_map;
+    init_blk_client(env, client_bootinfo);
+    /*
+     * 2. init blk_virt and start
+     */
+    create_helper_process(env, &blk_virt_thread);
+    set_helper_priority(env, &blk_virt_thread, 199);
+    // init shared memory
+    ZF_LOGI("After create virt process\n");
+    create_and_share_boot_info(env, blk_virt_thread.process, &vaddr_to_map);
+    blk_virt_boot_info_t *virt_bootinfo = (blk_virt_boot_info_t *) vaddr_to_map;
+    init_blk_virt_process(env, virt_bootinfo);
 
-    // init blk_driver_process
+    /**
+     * 3. init blk_driver_process and start
+    **/ 
+    create_helper_process(env, &blk_driver_thread);
+    set_helper_priority(env, &blk_driver_thread, 200);
+    ZF_LOGI("After create driver process\n");
+    create_and_share_boot_info(env, blk_driver_thread.process, &vaddr_to_map);
+    blk_driver_boot_info_t *driver_bootinfo = (blk_driver_boot_info_t *) vaddr_to_map;
+    init_blk_driver_server(env, driver_bootinfo);
+
+    // init shared memory
+
+
+    error = wait_for_helper(&blk_client_thread);
+    test_eq(error, 0);
 
 }
 DEFINE_TEST(BLK_001, "BLK Example", test_blk, true)
