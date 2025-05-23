@@ -87,6 +87,7 @@ static inline void blk_queue_init(blk_queue_handle_t *h,
                                   blk_resp_queue_t *response,
                                   uint32_t capacity)
 {
+    ZF_LOGI("In  blk_queue_init, request: %p, response: %p, capacity: %d\n", request, response, capacity);
     h->req_queue = request;
     h->resp_queue = response;
     h->capacity = capacity;
@@ -101,6 +102,10 @@ static inline void blk_queue_init(blk_queue_handle_t *h,
  */
 static inline bool blk_queue_empty_req(blk_queue_handle_t *h)
 {
+    ZF_LOGI("Test blk_queue_empty_req h->req_queue, %d\n", h->req_queue);
+    // ZF_LOGI("Test h->capacity, %d\n", h->capacity);
+    ZF_LOGI("Test blk_queue_empty_req h->req_queue->tail, %d\n", h->req_queue->tail);
+    ZF_LOGI("Test blk_queue_empty_req h->req_queue->head, %d\n", h->req_queue->head);
     return h->req_queue->tail - h->req_queue->head == 0;
 }
 
@@ -125,6 +130,10 @@ static inline bool blk_queue_empty_resp(blk_queue_handle_t *h)
  */
 static inline bool blk_queue_full_req(blk_queue_handle_t *h)
 {
+    ZF_LOGI("Test h->req_queue, %d\n", h->req_queue);
+    ZF_LOGI("Test h->capacity, %d\n", h->capacity);
+    ZF_LOGI("Test h->req_queue->tail, %d\n", h->req_queue->tail);
+    ZF_LOGI("Test h->req_queue->head, %d\n", h->req_queue->head);
     return h->req_queue->tail - h->req_queue->head == h->capacity;
 }
 

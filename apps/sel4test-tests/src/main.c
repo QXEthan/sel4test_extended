@@ -170,6 +170,8 @@ void init_simple(env_t env, test_init_data_t *init_data)
     env->simple.cnode_size = cnode_size_bits;
     env->simple.sched_ctrl = sched_ctrl;
     env->simple.core_count = core_count;
+    env->irq_ctrl = init_data->irq_ctrl;
+    ZF_LOGI("irq_ctrl: %lu\n", init_data->irq_ctrl);
 
     arch_init_simple(env, &env->simple);
 }

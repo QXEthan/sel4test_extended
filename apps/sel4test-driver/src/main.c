@@ -164,6 +164,18 @@ static unsigned int populate_untypeds(vka_object_t *untypeds)
         ZF_LOGF("No untypeds for tests!");
     }
 
+    // test
+    for (unsigned int i = 0; i < num_untypeds; i++) {
+    seL4_Word paddr, size_bits;
+    bool is_device;
+    simple_get_nth_untyped(&env.simple, i, &size_bits, &paddr, &is_device);
+
+    ZF_LOGI("UT[%02d] 0x%08lx-0x%08lx (%2ld KB) %s",
+                i, paddr, paddr + BIT(size_bits) - 1,
+                BIT(size_bits) / 1024,
+                is_device ? "DEVICE" : "RAM");
+}
+
     return num_untypeds;
 }
 
@@ -471,6 +483,8 @@ void *main_continued(void *arg UNUSED)
         error = vka_alloc_reply(&env.vka, &env.reply);
         ZF_LOGF_IF(error, "Failed to allocate reply");
     }
+    // irq control slot
+    env.init->irq_cap_index = 8;
 
     /* now run the tests */
     sel4test_run_tests(&env);
@@ -596,6 +610,12 @@ int main(void)
 
     int error;
     seL4_BootInfo *info = platsupport_get_bootinfo();
+    for (int i = 0; i < CONFIG_MAX_NUM_BOOTINFO_UNTYPED_CAPS; i++) {
+        ZF_LOGI("After bootinfo, UT[%02d] 0x%08lx-0x%08lx (%2ld KB) %s",
+                i, info->untypedList[i].paddr, info->untypedList[i].paddr + BIT(info->untypedList[i].sizeBits) - 1,
+                BIT(info->untypedList[i].sizeBits) / 1024,
+                info->untypedList[i].isDevice ? "DEVICE" : "RAM");
+    }
 
 #ifdef CONFIG_DEBUG_BUILD
     seL4_DebugNameThread(seL4_CapInitThreadTCB, "sel4test-driver");

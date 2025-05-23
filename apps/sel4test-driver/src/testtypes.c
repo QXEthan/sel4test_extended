@@ -121,12 +121,12 @@ static int sel4test_driver_wait(driver_env_t env, struct testcase *test)
 
     sel4rpc_server_init(&rpc_server, &env->vka, sel4rpc_default_handler, env,
                         &env->reply, &env->simple);
-
+    ZF_LOGD("Before while");
     while (1) {
         /* wait for tests to finish or fault, receive test request or report result */
         info = api_recv(env->test_process.fault_endpoint.cptr, &badge, env->reply.cptr);
         test_output = seL4_GetMR(0);
-
+        ZF_LOGD("After test");
         /* FIXME: Assumptions made at the time of writing this code:
          * 1) fault sync EP cap has a badge of 0
          * 2) notification_cap bound to sel4test-driver TCB, and has a non zero badge.
@@ -177,7 +177,6 @@ static int sel4test_driver_wait(driver_env_t env, struct testcase *test)
         if (config_set(CONFIG_HAVE_TIMER)) {
             timer_cleanup(env);
         }
-
         return result;
     }
 }
@@ -247,6 +246,13 @@ void basic_set_up(uintptr_t e)
     env->remote_vaddr = vspace_share_mem(&env->vspace, &(env->test_process).vspace, env->init, 1, PAGE_BITS_4K,
                                          seL4_AllRights, 1);
     assert(env->remote_vaddr != 0);
+    
+    //move irq control
+    seL4_CPtr irq_ctrl_cap = simple_get_irq_ctrl(&env->simple);
+    cspacepath_t irq_ctrl_path;
+    vka_cspace_make_path(&env->vka, irq_ctrl_cap, &irq_ctrl_path);
+    env->init->irq_ctrl = sel4utils_move_cap_to_process(&(env->test_process), irq_ctrl_path, NULL);
+    ZF_LOGI("################ driver-main #####################\n irq_crtl: %lu\n", env->init->irq_ctrl);
 
     /* WARNING: DO NOT COPY MORE CAPS TO THE PROCESS BEYOND THIS POINT,
      * AS THE SLOTS WILL BE CONSIDERED FREE AND OVERRIDDEN BY THE TEST PROCESS. */
@@ -255,7 +261,8 @@ void basic_set_up(uintptr_t e)
     if (env->init->device_frame_cap) {
         env->init->free_slots.start = env->init->device_frame_cap + 1;
     } else {
-        env->init->free_slots.start = env->endpoint + 1;
+        // env->init->free_slots.start = env->endpoint + 1;
+        env->init->free_slots.start = env->init->irq_ctrl + 1;
     }
     env->init->free_slots.end = (1u << TEST_PROCESS_CSPACE_SIZE_BITS);
     assert(env->init->free_slots.start < env->init->free_slots.end);
@@ -283,18 +290,19 @@ test_result_t basic_run_test(struct testcase *test, uintptr_t e)
     /* spawn the process */
     error = sel4utils_spawn_process_v(&(env->test_process), &env->vka, &env->vspace,
                                       argc, argv, 1);
+    ZF_LOGD("After spawn test process \n");
     ZF_LOGF_IF(error != 0, "Failed to start test process!");
 
     if (config_set(CONFIG_HAVE_TIMER)) {
         error = tm_alloc_id_at(&env->tm, TIMER_ID);
         ZF_LOGF_IF(error != 0, "Failed to alloc time id %d", TIMER_ID);
     }
-
+    ZF_LOGD("Before  sel4test_driver_wait\n");
     /* wait on it to finish or fault, report result */
     int result = sel4test_driver_wait(env, test);
 
     test_assert(result == SUCCESS);
-
+    ZF_LOGD("Before  result\n");
     return result;
 }
 

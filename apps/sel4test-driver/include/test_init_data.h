@@ -95,6 +95,12 @@ typedef struct {
     /* number of available cores */
     seL4_Word cores;
 
+    /** slot index for irq control*/
+    int irq_cap_index;
+
+    /** irq ctrl cap */
+    seL4_CPtr irq_ctrl;
+
 } test_init_data_t;
 
 compile_time_assert(init_data_fits_in_ipc_buffer, sizeof(test_init_data_t) < PAGE_SIZE_4K);
