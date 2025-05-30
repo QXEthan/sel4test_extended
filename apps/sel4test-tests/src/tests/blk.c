@@ -395,13 +395,6 @@ static void setup_driver_storage_info_shmem(struct env *env, sel4utils_process_t
     assert(err == seL4_NoError);
 }
 
-static void setup_driver_queue_shmem(struct env *env, sel4utils_process_t target_process, blk_driver_boot_info_t* bootinfo) {
-    size_t size_bytes = 0x200000;
-    ZF_LOGI("In setup_driver_queue_shmem: %d\n", size_bytes);
-    // map_and_share_frame2(env, target_process, bootinfo->request_shmem_vaddr, size_bytes);
-    // map_and_share_frame2(env, target_process, bootinfo->response_shmem_vaddr, size_bytes);
-}
-
 void notified(blk_driver_boot_info_t *boot_info)
 {
     ZF_LOGI("In Driver Notified\n");
@@ -469,7 +462,7 @@ void handle_response(blk_driver_boot_info_t *boot_info)
         uint32_t data_len = data_desc.len;
 #ifdef DEBUG_DRIVER
         uint64_t data_addr = data_desc.addr;
-        LOG_DRIVER("response data addr: 0x%lx, data len: %d\n", data_addr, data_len);
+        ZF_LOGI("response data addr: 0x%lx, data len: %d\n", data_addr, data_len);
 #endif
 
         uint16_t footer_desc_idx = virtq.desc[data_desc_idx].next;
@@ -510,7 +503,6 @@ void handle_request(blk_driver_boot_info_t *boot_info)
     /* Whether or not we notify the virtIO device to say something has changed
      * in the virtq. */
     bool virtio_queue_notify = false;
-    ZF_LOGI("In Handle request Before While, \n");
     /* Consume all requests and put them in the 'avail' ring of the virtq. We do not
      * dequeue unless we know we can put the request in the virtq. */
     while (!blk_queue_empty_req(&blk_queue) && ialloc_num_free(&ialloc_desc) >= 3) {
@@ -529,7 +521,6 @@ void handle_request(blk_driver_boot_info_t *boot_info)
         assert(BLK_TRANSFER_SIZE >= VIRTIO_BLK_SECTOR_SIZE);
         size_t virtio_block_number = block_number * (BLK_TRANSFER_SIZE / VIRTIO_BLK_SECTOR_SIZE);
         size_t virtio_count = count * (BLK_TRANSFER_SIZE / VIRTIO_BLK_SECTOR_SIZE);
-        ZF_LOGI("In Handle request While, req_code: %d\n", req_code);
         switch (req_code) {
         case BLK_REQ_READ:
         case BLK_REQ_WRITE: {
@@ -559,14 +550,6 @@ void handle_request(blk_driver_boot_info_t *boot_info)
             } else {
                 ZF_LOGI("handling write request with physical address 0x%lx, block_number: 0x%x, count: 0x%x, id: 0x%x\n",
                            phys_addr, block_number, count, id);
-                uintptr_t va = 0x20600000;
-                unsigned char *data = (unsigned char *)va;
-                ZF_LOGI("=== Begin Dump of Write Buffer @ vaddr = 0x%lx ===", va);
-                for (int i = 0; i < 64; i++) {
-                    if (i % 16 == 0) ZF_LOGI("");
-                    ZF_LOGI("%02x ", data[i]);
-                }
-                ZF_LOGI("\n=== End Dump ===");
             }
 
             uint32_t hdr_desc_idx = -1;
@@ -614,19 +597,6 @@ void handle_request(blk_driver_boot_info_t *boot_info)
                 .len = 1,
                 .flags = VIRTQ_DESC_F_WRITE,
             };
-            // 必须确保 index 没超 virtq.num
-            assert(hdr_desc_idx < virtq.num);
-            assert(data_desc_idx < virtq.num);
-            assert(footer_desc_idx < virtq.num);
-
-            // flags 检查
-            assert((virtq.desc[hdr_desc_idx].flags & VIRTQ_DESC_F_NEXT) != 0);
-            assert((virtq.desc[data_desc_idx].flags & VIRTQ_DESC_F_NEXT) != 0);
-            assert((virtq.desc[footer_desc_idx].flags & VIRTQ_DESC_F_NEXT) == 0);
-
-            // next 指向合法
-            assert(virtq.desc[hdr_desc_idx].next < virtq.num);
-            assert(virtq.desc[data_desc_idx].next < virtq.num);
 
             virtq.avail->ring[virtq.avail->idx % virtq.num] = hdr_desc_idx;
             virtq.avail->idx++;
@@ -654,8 +624,8 @@ void handle_request(blk_driver_boot_info_t *boot_info)
                     virtq.desc[footer_desc_idx].flags);
 
             virtio_queue_notify = true;
-
             virtio_header_to_id[hdr_desc_idx] = id;
+
             break;
         }
         case BLK_REQ_FLUSH: {
@@ -694,8 +664,6 @@ void handle_request(blk_driver_boot_info_t *boot_info)
         }
         ZF_LOGI("Before doorbell\n");
         regs->QueueNotify = 0;
-        cache_clean((unsigned long)virtq.desc, (unsigned long)(virtq.desc + virtq.num));
-        cache_clean((unsigned long)virtq.avail, (unsigned long)(virtq.avail + 1));
 
         ZF_LOGI("check setting, regs->QueueReady: %d\n", regs->QueueReady);
         ZF_LOGI("check setting, virtq.avail->idx = %u", virtq.avail->idx);
@@ -954,20 +922,14 @@ bool test_basic(blk_client_boot_info_t *boot_info)
         ZF_LOGI("basic: START state\n");
         // We assume that the data fits into two blocks
         assert(basic_data_len <= BLK_TRANSFER_SIZE * 2);
-
         // Copy our testing data into the block data region
         char *data_dest = (char *)boot_info->client_data_vaddr;
         sddf_memcpy(data_dest, basic_data, basic_data_len);
-        ZF_LOGI("After sddf_memcpy, %p\n", data_dest);
-        ZF_LOGI("Test &blk_queue, %p\n", &blk_c2v_queue);
-        int err = blk_enqueue_req(&blk_c2v_queue, BLK_REQ_WRITE, 0, REQUEST_BLK_NUMBER, REQUEST_NUM_BLOCKS, 0);
-        ZF_LOGI("After blk_enqueue_req\n");
-        assert(!err);
 
-        for (int i = 0; i < 64; i++) {
-            ZF_LOGI("%02x ", basic_data[i] & 0xff);
-        }
-        
+        int err = blk_enqueue_req(&blk_c2v_queue, BLK_REQ_WRITE, 0, REQUEST_BLK_NUMBER, REQUEST_NUM_BLOCKS, 0);
+
+        assert(!err);
+    
         test_basic_state = READ;
 
         break;
@@ -1022,11 +984,11 @@ bool test_basic(blk_client_boot_info_t *boot_info)
             ZF_LOGI("basic_data[%d] = %02x, read_data[%d] = %02x", i, basic_data[i] & 0xff, i, read_data[i] & 0xff);
         }
 
-        // for (int i = 0; i < BLK_TRANSFER_SIZE; i += 90) {
-        //     for (int j = 0; j < 90; j++) {
-        //         ZF_LOGI("%c", read_data[i + j]);
-        //     }
-        // }
+        for (int i = 0; i < BLK_TRANSFER_SIZE; i += 90) {
+            for (int j = 0; j < 90; j++) {
+                ZF_LOGI("%c", read_data[i + j]);
+            }
+        }
         ZF_LOGI("\n");
 
         ZF_LOGI("basic: successfully finished!\n");
@@ -1098,7 +1060,6 @@ static void init_blk_client_virt(struct env *env, struct blk_client_boot_info * 
     virt_bootinfo->client_request_shmem_vaddr = 0x20a00000;
     virt_bootinfo->client_response_shmem_vaddr = 0x20c00000;
     virt_bootinfo->client_storage_info_vaddr = 0x20800000;
-    // client_bootinfo->client_data_paddr = 0x7d9f0000; 
 
     ZF_LOGI("After init bootinfo\n");
     // storage info, size = 0x1000
@@ -1305,12 +1266,12 @@ static void handle_driver(blk_virt_boot_info_t* bootinfo)
 
 static bool handle_client(blk_virt_boot_info_t* bootinfo)
 {
-    ZF_LOGI("In handle_client\n");
     int err = 0;
     blk_queue_handle_t h = client.queue_h;
     uintptr_t cli_data_base_paddr = bootinfo->client.data.io_addr;
     uintptr_t cli_data_base_vaddr = bootinfo->client.data.region.vaddr;
     uint64_t cli_data_region_size = bootinfo->client.data.region.size;;
+    ZF_LOGI("In handle client, paddr: %lu, vaddr: %lu, region_size: %lu", cli_data_base_paddr, cli_data_base_vaddr, cli_data_region_size);
 
     blk_req_code_t cli_code = 0;
     uintptr_t cli_offset = 0;
@@ -1326,9 +1287,10 @@ static bool handle_client(blk_virt_boot_info_t* bootinfo)
      * is not full. We check the index allocator as there can be more in-flight requests
      * than currently in the driver queue.
      */
-    ZF_LOGI("Before while\n");
+    ZF_LOGI("Test blk_queue_empty_req h->req_queue, %p", h.req_queue);
+    ZF_LOGI("Test blk_queue_empty_req h->req_queue->tail, %u", h.req_queue->tail);
+    ZF_LOGI("Test blk_queue_empty_req h->req_queue->head, %u", h.req_queue->head);
     while (!blk_queue_empty_req(&h) && !blk_queue_full_req(&blk_v2d_queue) && !ialloc_full(&ialloc)) {
-        ZF_LOGI("In while\n");
         err = blk_dequeue_req(&h, &cli_code, &cli_offset, &cli_block_number, &cli_count, &cli_req_id);
         assert(!err);
 
@@ -1336,7 +1298,6 @@ static bool handle_client(blk_virt_boot_info_t* bootinfo)
         drv_block_number = cli_block_number + (client.start_sector / (BLK_TRANSFER_SIZE / MSDOS_MBR_SECTOR_SIZE));
 
         blk_resp_status_t resp_status = BLK_RESP_ERR_UNSPEC;
-        ZF_LOGI("Before switch\n");
         switch (cli_code) {
         case BLK_REQ_READ:
         case BLK_REQ_WRITE: {
@@ -1368,6 +1329,13 @@ static bool handle_client(blk_virt_boot_info_t* bootinfo)
                 resp_status = BLK_RESP_ERR_INVALID_PARAM;
                 goto req_fail;
             }
+            
+            // test
+            uintptr_t paddr_to_driver = cli_data_base_paddr + cli_offset;
+            ZF_LOGI("send paddr = 0x%lx", paddr_to_driver);
+
+
+
             break;
         }
         case BLK_REQ_FLUSH:
@@ -1507,7 +1475,9 @@ static void init_blk_virt_driver(struct env *env, struct blk_virt_boot_info * vi
     virt_bootinfo->client.conn.resp_queue.vaddr = (void *)0x20c00000;
     virt_bootinfo->client.data.region.vaddr = (void *)0x20e00000;
     virt_bootinfo->client.data.region.size = (void *)0x200000;
-    
+    virt_bootinfo->client.data.io_addr = virt_bootinfo->client_data_paddr;
+
+
     // virt_bootinfo->client.data.io_addr = 0x5f9f0000;
 
     // config.driver.conn.storage_info.vaddr = (void *)0x20000000;
@@ -1517,16 +1487,14 @@ static void init_blk_virt_driver(struct env *env, struct blk_virt_boot_info * vi
     // config.driver.data.io_addr = 0x5fbf0000;
 
 
-    // paddr
     driver_bootinfo->storage_info_vaddr = 0x20400000;
     driver_bootinfo->request_shmem_vaddr = 0x20600000;
     driver_bootinfo->response_shmem_vaddr = 0x20800000;
-    ZF_LOGI("After init bootinfo\n");
+    ZF_LOGI("After init bootinfo, virt_bootinfo->client.data.io_addr: %p\n", virt_bootinfo->client.data.io_addr);
     void* paddr;
     map_and_share_frame(env, blk_driver_thread.process, blk_virt_thread.process, 
         0, virt_bootinfo->driver_data_vaddr, 0x200000, &paddr, 1);
     virt_bootinfo->driver_data_paddr = paddr;
-    virt_bootinfo->client.data.io_addr = paddr;
     map_and_share_frame2(env, blk_driver_thread.process, blk_virt_thread.process, 
         driver_bootinfo->storage_info_vaddr, virt_bootinfo->driver_storage_info_vaddr, 0x1000, 0, 1);
     map_and_share_frame2(env, blk_driver_thread.process, blk_virt_thread.process, 
@@ -1629,9 +1597,10 @@ static int test_blk(struct env *env)
     ZF_LOGI("After create driver process, %p\n", driver_bootinfo->storage_info_vaddr);
 
     // init shared memory
-    init_blk_driver_server(env, driver_bootinfo);
-    init_blk_virt_driver(env, virt_bootinfo, driver_bootinfo);
     init_blk_client_virt(env, client_bootinfo, virt_bootinfo);
+    init_blk_virt_driver(env, virt_bootinfo, driver_bootinfo);
+    init_blk_driver_server(env, driver_bootinfo);
+
     ZF_LOGI("After init client vs virt shared memory\n");
 
     // notification
