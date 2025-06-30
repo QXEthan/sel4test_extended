@@ -27,7 +27,20 @@ file(
         src/arch/${KernelArch}/tests/*.S
 )
 
-add_executable(sel4test-tests EXCLUDE_FROM_ALL ${deps})
+# Import build rules for blk app
+add_subdirectory(../blk-client blk-client)
+add_subdirectory(../blk-virt blk-virt) 
+add_subdirectory(../blk-driver blk-driver)
+
+set(CPIO_INPUTS
+    $<TARGET_FILE:blk-client>
+    $<TARGET_FILE:blk-virt>
+    $<TARGET_FILE:blk-driver>)
+
+include(cpio)
+MakeCPIO(child_archive.o "${CPIO_INPUTS}" CPIO_SYMBOL _child_cpio DEPENDS blk-client blk-virt blk-driver)
+
+add_executable(sel4test-tests EXCLUDE_FROM_ALL ${deps} child_archive.o)
 # special handling for "arm_hyp", it's really "aarch32"
 set(_inc_folder_KernelSel4Arch "${KernelSel4Arch}")
 if("${KernelSel4Arch}" STREQUAL "arm_hyp")

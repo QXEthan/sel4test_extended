@@ -61,6 +61,7 @@ file(
 
 # Import build rules for test app
 add_subdirectory(../sel4test-tests sel4test-tests)
+
 include(cpio)
 MakeCPIO(archive.o "$<TARGET_FILE:sel4test-tests>")
 

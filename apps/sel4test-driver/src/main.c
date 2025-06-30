@@ -421,6 +421,8 @@ void *main_continued(void *arg UNUSED)
     int status = elf_newFile(elf_file, elf_size, &tests_elf);
     ZF_LOGF_IF(status, "Error: invalid ELF file");
 
+    seL4_BootInfo *bootinfo = platsupport_get_bootinfo();
+
     /* Print welcome banner. */
     printf("\n");
     printf("seL4 Test\n");

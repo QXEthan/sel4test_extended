@@ -141,6 +141,7 @@ static int sel4test_driver_wait(driver_env_t env, struct testcase *test)
             assert(config_set(CONFIG_HAVE_TIMER));
         }
 
+        ZF_LOGD("if (config_set(CONFIG_HAVE_TIMER) && badge != 0)\n");
         if (config_set(CONFIG_HAVE_TIMER) && badge != 0) {
             /* handle timer interrupts in hardware */
             handle_timer_interrupts(env, badge);
@@ -151,7 +152,7 @@ static int sel4test_driver_wait(driver_env_t env, struct testcase *test)
             ZF_LOGF_IF(error, "Failed to update time manager");
             continue;
         }
-
+        ZF_LOGD("if (sel4test_isTimerRPC(test_output)), %d\n", result);
         if (sel4test_isTimerRPC(test_output)) {
 
             if (config_set(CONFIG_HAVE_TIMER)) {
@@ -165,11 +166,13 @@ static int sel4test_driver_wait(driver_env_t env, struct testcase *test)
             sel4rpc_server_recv(&rpc_server);
             continue;
         }
-
+        ZF_LOGD("if (seL4_MessageInfo_get_label(info) != seL4_Fault_NullFault), %d\n", result);
         result = test_output;
         if (seL4_MessageInfo_get_label(info) != seL4_Fault_NullFault) {
+            ZF_LOGD("In if (seL4_MessageInfo_get_label(info) != seL4_Fault_NullFault)\n");
             sel4utils_print_fault_message(info, test->name);
-            printf("Register of root thread in test (may not be the thread that faulted)\n");
+            ZF_LOGD("After sel4utils_print_fault_message\n");
+            printf("Register of root thread in test (may not be the thread that faulted)\n");   
             sel4debug_dump_registers(env->test_process.thread.tcb.cptr);
             result = FAILURE;
         }
@@ -177,6 +180,7 @@ static int sel4test_driver_wait(driver_env_t env, struct testcase *test)
         if (config_set(CONFIG_HAVE_TIMER)) {
             timer_cleanup(env);
         }
+        ZF_LOGD("Before return");
         return result;
     }
 }
@@ -192,6 +196,17 @@ void basic_set_up(uintptr_t e)
     config = process_config_create_cnode(config, TEST_PROCESS_CSPACE_SIZE_BITS);
     error = sel4utils_configure_process_custom(&(env->test_process), &env->vka, &env->vspace, config);
     assert(error == 0);
+
+    // /** mapping cpio to test process */
+    // void * base_page = (void *)(env->init->cpio_vaddr & ~(BIT(seL4_PageBits) - 1));
+    // void * end_page  = (void *) ROUND_UP(env->init->cpio_vaddr_end, BIT(seL4_PageBits));
+    // size_t share_bytes = end_page - base_page;
+    // size_t pages = share_bytes >> seL4_PageBits;
+
+    // ZF_LOGI("cpio address: %p, end: %p, base_page: %p, end: %p\n", (void *)env->init->cpio_vaddr, (void *)env->init->cpio_vaddr_end, base_page, end_page);
+    // reservation_t reservation1 = vspace_reserve_range_at(&env->test_process.vspace, base_page, share_bytes, seL4_ReadWrite, 0);
+    // error = vspace_share_mem_at_vaddr(&env->vspace, &env->test_process.vspace, base_page, pages, seL4_PageBits, base_page, reservation1);
+    // assert(error == seL4_NoError);
 
     /* set up caps about the process */
     env->init->stack_pages = CONFIG_SEL4UTILS_STACK_SIZE / PAGE_SIZE_4K;
