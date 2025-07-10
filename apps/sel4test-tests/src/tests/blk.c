@@ -578,7 +578,8 @@ static int test_blk(struct env *env)
 
     ZF_LOGI("Before irq init\n");
     // irq
-    seL4_CPtr irq_ctrl = env->irq_ctrl;
+    test_init_data_t *idata = (test_init_data_t *) env->simple.data;
+    seL4_CPtr irq_ctrl = idata->irq_ctrl;
     ZF_LOGI("Get irq_ctrl: %lu\n", irq_ctrl);
     seL4_CPtr badged_nt = badge_endpoint(env, VIRT_IRQ, nt_v2d);
     assert(error == seL4_NoError);
