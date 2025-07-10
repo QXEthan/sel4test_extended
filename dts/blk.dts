@@ -1,4 +1,11 @@
 /*
+ * Copyright 2024 Ethan Xu
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+
+/*
  * DTS of QEMU v8.2.2 for:
  *    qemu-system-aarch64
  *    -machine
