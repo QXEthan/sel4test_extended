@@ -2,7 +2,7 @@
  * Copyright 2007, 2009, IBM Corporation
  * Copyright 2011, Red Hat, Inc
  *
- * SPDX-License-Identifier: BSD-3-Clause
+ * SPDX-License-Identifier: BSD-2-Clause
  */
 
 /*

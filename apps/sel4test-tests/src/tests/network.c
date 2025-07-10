@@ -1,3 +1,10 @@
+/*
+ * Copyright 2024 Ethan Xu
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+
 #include <string.h>
 #include <stdio.h>
 

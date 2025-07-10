@@ -1,3 +1,9 @@
+#
+# Copyright 2024 Ethan Xu
+#
+# SPDX-License-Identifier: BSD-2-Clause
+#
+
 cmake_minimum_required(VERSION 3.7.2)
 project(blk-client C)
 
