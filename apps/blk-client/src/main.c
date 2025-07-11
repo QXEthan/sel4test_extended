@@ -143,9 +143,9 @@ bool test_basic(blk_client_boot_info_t *boot_info)
                 seL4_DebugPutChar(read_data[i + j]);
             }
         }
-        seL4_DebugPutChar("\n");
+        seL4_DebugPutString("\n");
 
-        ZF_LOGI("basic: successfully finished!\n");
+        seL4_DebugPutString("[BLK_001] BLK Example ran successfully!\n");
 
         return true;
     }
