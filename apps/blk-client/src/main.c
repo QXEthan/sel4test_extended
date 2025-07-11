@@ -140,7 +140,7 @@ bool test_basic(blk_client_boot_info_t *boot_info)
 
         for (int i = 0; i < BLK_TRANSFER_SIZE; i += 90) {
             for (int j = 0; j < 90; j++) {
-                ZF_LOGI("%c", read_data[i + j]);
+                seL4_DebugPutChar(read_data[i + j]);
             }
         }
         ZF_LOGI("\n");
