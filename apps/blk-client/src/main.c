@@ -143,7 +143,7 @@ bool test_basic(blk_client_boot_info_t *boot_info)
                 seL4_DebugPutChar(read_data[i + j]);
             }
         }
-        ZF_LOGI("\n");
+        seL4_DebugPutChar("\n");
 
         ZF_LOGI("basic: successfully finished!\n");
 
